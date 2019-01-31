@@ -1,0 +1,30 @@
+// call to hook_views_pre_execute to override the query for the groups browser
+function views_views_pre_execute(&$view) {
+   drupal_set_message($view->name);
+   if($view->name=="page_1") {
+//   drupal_set_message($this->build_info['query'][1]);
+//    drupal_set_message($view->build_info['query_args'][0]);
+//    drupal_set_message($view->build_info['query_args'][1]);
+      $account = \Drupal::currentUser();
+
+      $view->build_info['query']="SELECT file_managed.fid AS fid, field_coursework_file_file_managed.nid AS field_coursework_file_file_managed_nid FROM {file_managed} file_managed INNER JOIN {node__field_coursework_file} node__field_coursework_file ON file_managed.fid = node__field_coursework_file.field_coursework_file_target_id AND node__field_coursework_file.deleted = '0' INNER JOIN {node_field_data} field_coursework_file_file_managed ON node__field_coursework_file.entity_id = field_coursework_file_file_managed.nid LEFT JOIN {node__field_teachers_with_access_to_th} field_coursework_file_file_managed__node__field_teachers_with_access_to_th ON field_coursework_file_file_managed.nid = field_coursework_file_file_managed__node__field_teachers_with_access_to_th.entity_id AND (field_coursework_file_file_managed__node__field_teachers_with_access_to_th.deleted = '0' AND field_coursework_file_file_managed__node__field_teachers_with_access_to_th.langcode field_coursework_file_file_managed.langcode)
+
+
+      WHERE (( (field_coursework_file_file_managed__node__field_teachers_with_access_to_th.field_teachers_with_access_to_th_value LIKE '%All teachers%') OR (field_coursework_file_file_managed.uid = '' + $account->id() ) OR (field_coursework_file_file_managed__node__field_teachers_with_access_to_th.field_teachers_with_access_to_th_value LIKE '%' + $account->getUsername() + '%') )
+
+
+      AND ((( (file_managed.filename LIKE '%pdf%' ESCAPE '\\') OR (file_managed.filename LIKE '%docx%' ESCAPE '\\') OR (file_managed.filename LIKE '%tex%' ESCAPE '\\') )))) LIMIT 11 OFFSET 0";
+   }
+}
+
+
+
+
+module_invoke_all('views_pre_execute', $this);
+instead of:
+
+// Let modules modify the view just prior to executing it.
+    foreach (module_implements('views_pre_execute') as $module) {
+      $function = $module . '_views_pre_execute';
+      $function($this);
+    }

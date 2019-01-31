@@ -1,0 +1,292 @@
+\documentclass [10 pt, a4 paper]{report}
+\usepackage[utf8]{inputenc}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{listings, lstautogobble}
+\usepackage{comment}
+
+\usepackage{caption}
+\captionsetup{labelsep=space,justification=centering,font={bf},singlelinecheck=off,skip=4pt,position=top}
+
+
+\lstset{language={C++},
+basicstyle=\ttfamily\scriptsize,
+autogobble=true
+}
+
+
+\title{MSc in CSTE \\ High Performance Technical Computing}
+\author{Patricia Colbere \\ Cranfield University}
+\date{January 2019}
+
+\begin{document}
+
+\maketitle
+
+\tableofcontents
+
+\begin{abstract}
+    In this report we try to solve a first order wave equation with a parallel program. We will be solving it with an explicit upwind FTBS scheme, an implicit upwind FTBS scheme and an implicit FTCS scheme. We will solve it with a $\Delta$x of 0.5m and three $\Delta$t of 0.002s, 0.001s and 0.0005s. We will present our design that has been arranged for a parallel treatment of the program with MPI. The solving of each time step is parallelised between the various processors so that the calculations are made faster overall. Then we will discuss our costs of communication and our costs of computation, with tables of times, which are much higher for the implicit than for the explicit scheme. After that we will see the performances of our serial and parallel codes with their weak and strong scalabilities. We will deduce the speedup and efficiency. In the end we will see what is the right problem size for the parallelisation of our program to be useful.
+   
+
+\end{abstract}
+
+
+
+\chapter{Introduction}
+We will study the parallelisation of a program that numerically solves a partial differential wave equation of the first order with three different schemes. We will begin by explaining the design we employed, especially the changes made so that it is parallel. Then we will calculate the costs of communications and of computations. We will also show the performances of our program and its weak and strong scalabilities as well as its speedup and efficiency. Finally we will find the right problem size for the parallelisation of our problem.
+
+
+
+
+
+\chapter{Design employed}
+% UML + files changed
+We will be explaining and justifying the design used to solve this equation in a parallel way. Firstly we will present the general design of our program, that is similar to the design of our computational methods program in sequential. Then we will present more in details the design related to the parallel programming part of this project.
+
+\section{General design of the program}
+The general design is similar to the one employed for the serial solving of the equation. To get a broad view of it we will examine the UML diagram of our program. This diagram will be put in the appendices for a better readability.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=1.35\textwidth]{UMLdiagram.jpg}
+\caption{\label{fig:image} UML diagram of the program}
+\end{figure}
+
+\noindent
+The classes that have been changed to make the program a parallel one are ImplicitSchemes, ExplicitSchemes, ExplicitUpwindFTBS, Commons and the Main. For the ExplicitSchemes class, the changes are inside of already existing functions so we will explain them in the next section. The Main file has also only been changed inside of already existing functions so we will present it in the next section.
+\\ \\
+The Commons class has been changed to give easy access to values that are useful throughout the program for parallel programming. The new function getMyRank returns the rank of the current processor. The function getNpes returns the total number of processors running the program. Besides, we also use numberOfPointsPerResult that gives us the total number of points of one solution at a given time, which is the size of a solution produced by all the vectors. In a complementary way, numberOfPointsPerProcessor returns the number of points contained in an individual solution produced by a single processor, independently from the other ones. This is this individual solution that will be recuperated by a gather at the end of the time step to produce a solution to the equation for the current time step.
+\\ \\
+The ImplicitSchemes and ExplicitUpwindFTBS classes are changed in a similar way to each other. For the ExplicitUpwindFTBS class, we added the ExplicitSchemeUntiln function, that calculates a solution for one processor. It takes a lastIndex variable from which it calculates a first index. Then it gives the corresponding solution, calculated between the first and last indexes. Later, each individual solution is regrouped so we get the solution between the first index of the first processor and the last index of the last processor. Similarly, the ImplicitSchemes class includes a ThomasAlgorithmUntiln function. It gives the result of the Thomas algorithm between the variable lastIndex and the corresponding first index. All these solutions are regrouped to give the actual result of the Thomas algorithm for the whole solution of a given time step. We will now see the changes due to parallel programming in more details in the code.
+
+
+
+
+\section{Details in the design of the program}
+We will show examples of the code that correspond to parallel programming and explain them. In the Main file we included the MPI library and initialised it at the beginning of the program as well as finalised it at the end. It is also in the Main that we ask the user which scheme and which $\Delta$t he wants. The values are broadcast to every processor.
+
+\begin{lstlisting}[caption=Call of broadcast in the Main, label={lst:code1}, frame=single]
+MPI_Bcast(&type, 1, MPI_INT, 0, MPI_COMM_WORLD);
+MPI_Bcast(&dtIndex, 1, MPI_INT, 0, MPI_COMM_WORLD);
+\end{lstlisting}
+
+\noindent
+In the Commons class, for the number of points per processor, we chose to take the value of the number of points per result divided by the number of processors, and to this division we add one, so that the number of points calculated by each processor is more similar. This way, the time taken by each processor is approximately the same and the total time of the program is reduced.
+
+\begin{lstlisting}[caption=numberOfPointsPerProcessor() in Commons, label={lst:code1}, frame=single]
+int Commons::numberOfPointsPerProcessor() {
+	return (int)((numberOfPointsPerResult() / getNpes()) + 1);
+}
+\end{lstlisting}
+
+\clearpage
+\noindent
+For ExplicitUpwindFTBS, the only use of MPI is to gather the results of each processor, as each processor works individually. We chose to use an all gather so that every processor gets the final result, as each result is calculated from the previous one. We chose all gatherv because we use vectors.
+
+\begin{lstlisting}[caption=Gather function in ExplicitUpwindFTBS, label={lst:code1}, frame=single]
+MPI_Allgatherv(res.data(), res.size(), MPI_DOUBLE, finalRes.data(), 
+recv_counts.data(), displs.data(), MPI_DOUBLE, MPI_COMM_WORLD);
+\end{lstlisting}
+
+\noindent
+For ImplicitSchemes there is a similar all gatherv to regroup the results of all the processors because we still use vectors and each solution is also calculated from the previous solution. Moreover, there are other communications in the new Thomas algorithm function. Indeed, the first values of bPrime, dPrime and m are only known for the first processor, so the other ones need to receive them.
+
+\begin{lstlisting}[caption=Receive functions in ImplicitSchemes, label={lst:code1}, frame=single]
+if (firstIndex == 0) {
+	bPrime.push_back(b[0]);
+	dPrime.push_back(f[0]);
+	m.push_back(0);
+}
+else {	//If I'm not the first processor, I need to receive the first values
+	MPI_Status status;
+	MPI_Recv(&nextBPrime, 1, MPI_DOUBLE, fx.getMyRank() - 1, 1, ...);
+	MPI_Recv(&nextDPrime, 1, MPI_DOUBLE, fx.getMyRank() - 1, 2, ...);
+	MPI_Recv(&nextM, 1, MPI_DOUBLE, fx.getMyRank() - 1, 3, ...);
+	bPrime.push_back(nextBPrime);
+	dPrime.push_back(nextDPrime);
+	m.push_back(nextM);
+}
+\end{lstlisting}
+
+\noindent
+Additionally we also put a verification for the given value of lastIndex to check that it is not bigger than the last index of the result given by all the processors. We also only print results if the rank of the current processor is zero to avoid a repetition of the results when using multiple processors. We will now see the results given by the design we used and discuss these results.
+
+
+
+%\clearpage
+
+\chapter{Analysis of the results}
+We will be discussing various aspects of our results. We will begin by showing our numerical solutions, serial and parallel, and compare them to the analytical solution. Then we will discuss the costs of communication and of computing a time step for each process. We will use these costs to deduce the performances of the serial and parallel codes with their speed-up, their efficiency and their weak and strong scalability. We have not been able to find an external mathematical library to replace the linear system solver so we will finish by finding the appropriate problem size for which MPI parallelisation is efficient for our problem.
+
+\section{Study of our numerical solutions compared with the analytical solution}
+We will compare the serial, parallel and analytical solutions and discuss our results. For the parallel solutions we will be using four processors. Since both implicit schemes are calculated in a similar way, we will only be showing the results for the implicit upwind FTBS and explicit upwind FTBS schemes. Our implicit FTCS scheme can be seen in the appendices, however there are some errors in the communication for this scheme as the results are not those expected. We will be presenting both schemes, first the explicit and then the implicit upwind, and for them we will be presenting the three $\Delta$t. We are comparing serial and parallel with analytical for these three $\Delta$t.
+
+\clearpage
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=1.35\textwidth]{allResExpl.jpg}
+\caption{\label{fig:image} Results for the explicit upwind FTBS scheme}
+\end{figure}
+
+\noindent
+We can see that the serial and the parallel results are the same, which is logical because they calculate the solution with the same method. We can also see that the error is higher with a tinier $\Delta$t.This may come from the fact that we make more calculations, and so the round off error is bigger. Indeed for $\Delta$t = 0.001 and 0.0005 seconds the solutions at a later time step are more different to the analitycal than those at an earlier time step. Their maximum is lower than it should be. This is also seen in the errors calculated.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.7\textwidth]{tableErrorExpl.jpg}
+\caption{\label{fig:image} Norms of the errors for the explicit upwind FTBS scheme}
+\end{figure}
+
+\noindent
+Indeed we see that the norms of the error for the first $\Delta$t can be approximated to zero, while for the other $\Delta$t they are more than 8 and 35 for the max norm and two norm respectively. The errors grow with $\Delta$t here. Moreover, the norms of the errors are the same for the serial and for the parallel program, showing that this in itself does not change the solution, only the speed at which we obtain it. We will now see the results for the implicit upwind FTBS.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=1.35\textwidth]{AllResImplUp.jpg}
+\caption{\label{fig:image} Results for the implicit upwind FTBS scheme}
+\end{figure}
+
+\noindent
+Once again the parallel and serial results are the same. However this time we can see that the numerical result becomes closer to the analytical solution with a tinier $\Delta$t. That is because a tinier $\Delta$t means more points calculated so if these points do not bring imprecisions the result will be more accurate. This is reflected in the norms of the errors.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.7\textwidth]{tableErrorImplUp.jpg}
+\caption{\label{fig:image} Norms of the errors for the implicit upwind FTBS scheme}
+\end{figure}
+
+\noindent
+We can see that the error has a smaller variation proportionally to its value compared to the explicit scheme, as the errors stay in the same order. The max norm is around 14.5 and the two norm is around 85. They are all higher than those of the explicit scheme, which shows that the implicit upwind FTBS is less accurate than the explicit. It may need even smaller $\Delta$t and $\Delta$x in order to become more precise.
+\\ \\
+We have seen that the schemes have the same results when calculated in parallel and in serial, which is because they are calculated in a way that does not affect each individual value of the result. Indeed it is the time taken to make the calculations that is affected.
+
+
+\section{Costs of communication and costs of computing a time step}
+It is the time used by the program that is influenced by the parallelisation of the program. Indeed we aim to reduce the total time taken for the program to give us our results. For this we need to minimise the time taken by each process to calculate, which is the cost of computing, and the time taken by the processes to exchange values, the cost of communication. We will be calculating those values for the explicit scheme and for the implicit upwind FTBS scheme.
+
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=1.35\textwidth]{tableTimesExpl.jpg}
+\caption{\label{fig:image} Table of times for the explicit upwind FTBS scheme}
+\end{figure}
+
+\noindent
+We can see that the computation times for all processes and for all $\Delta$t is the same, $6*10^6$s. However the communication time is different for the different processes and for the different $\Delta$t. Indeed it varies depending on how quickly all the processes have finished their calculations. However, it stays in the same order around $10^-4$s. Because these communication times are longer than the computation times it may not be useful to have parallel programming. We will decide this in the next sections. For the two next tables, we have chosen to use 16 processors.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=1.35\textwidth]{tableTimesImpl.jpg}
+\caption{\label{fig:image} Table of times for the implicit upwind FTBS scheme}
+\end{figure}
+
+\noindent
+The times of the implicit upwind FTBS scheme are much higher than the explicit. Indeed the computation time is always 0.02s, which is $10^4$ times higher. The communication time is also $10^2$ times higher for the implicit. The communication time here is more complicated because it increases with the index of the time step. Indeed for the first time step it is around 0.02s and for the last it can sometimes reach 1.4s. This indicates that we should improve the costs of communication for our program.
+\\ \\
+For the implicit scheme, both costs are much more important than for the explicit scheme. However for both cases, each process has similar times to the others, and the cost of communication is similar to the cost of computation. Because of this it may be rather inefficient to use many processors to run our program. We will verify this in the following sections.
+
+
+
+\section{Performances of the serial and parallel codes}
+We will see the strong scalability and the weak scalability of our program for the explicit and the implicit FTBS schemes.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.65\textwidth]{WeakScalExpl.jpg}
+\caption{\label{fig:image} Weak scalability for the explicit upwind FTBS scheme}
+\end{figure}
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.65\textwidth]{WeakScalImpl.jpg}
+\caption{\label{fig:image} Weak scalability for the implicit upwind FTBS scheme}
+\end{figure}
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.65\textwidth]{StrongScalExpl.jpg}
+\caption{\label{fig:image} Strong scalability for the explicit upwind FTBS scheme}
+\end{figure}
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.65\textwidth]{StrongScalImpl.jpg}
+\caption{\label{fig:image} Strong scalability for the implicit upwind FTBS scheme}
+\end{figure}
+
+\noindent
+We can see that they all have the same form. This is mostly linear. That means that the time we lose by communicating is more important than the time we gain by parallelising the computations. 
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.65\textwidth]{EfficiencyExpl.jpg}
+\caption{\label{fig:image} Efficiency for the explicit upwind FTBS scheme}
+\end{figure}
+\noindent
+The efficiency resulting from the bad speedup decreases very fast so our problem size is probably too little to make the parallelisation useful and efficient. We will now try to see what would be the right size of problem.
+
+\section{Finding the right problem size for this parallelisation}
+We will now try to find which problem size is right for the parallelisation of our program. We tried different problem sizes to see if we could get a better speedup with bigger problem sizes. Indeed with a problem ten times smaller we do get a better speedup and the problem becomes faster to solve with more processors. However a problem five times smaller is still not enough. Therefore we would need a program ten times smaller so that parallelisation becomes useful. However, to truly have an efficient parallelisation we would probably need to change the code of the program.
+
+
+
+
+\chapter{Conclusion}
+We have seen that our explicit scheme was more precise than our implicit ones with a smaller max norm and two norm of the errors. We have also seen that the explicit scheme had much smaller costs of communication and computation, but for all of our schemes the communication costs are still too high, and our performances are low. The parallelisation of our program is not efficient, and our problem is too small to necessitate the use of parallelisation. Indeed we would need a problem ten times smaller to have a use of parallelisation.
+\\ \\
+However with more time and resources we could make our parallelisation more efficient, for instance we could start a next step without waiting for the previous one to finish. We could also have corrected our parallelisation of the implicit FTCS class which currently gives us wrong results. We could have also made our parallel program more efficient by having non blocking communication instead of our current blocking one. With such a parallel program we could also get better performances and possibly make our parallelisation efficient for the current problem size.
+
+
+
+
+\chapter{Bibliography}
+
+\begin{itemize}
+    \item Course of High Performance Technical Computing by Irene Moulitsas
+    \item W. Gropp et al, “Using MPI. Portable Parallel Programming with Message-Passing Interface”, MIT Press, 1999
+    \item R. Chandra et al, “Parallel Programming in OpenMP”, Morgan Kaufmann, 2001
+\end{itemize}
+
+
+
+\chapter{Appendices}
+
+\section{How to use the code}
+Along with the code there are mpi... .sub files and input... .txt files. To launch a job in a queue we can just launch the mpi sub file. 
+The first number after mpi indicates the scheme (1 for the explicit upwind FTBS scheme, 2 for the implicit upwind FTBS scheme and 3 for the implicit FTCS scheme).
+The second number indicates the $\Delta$t (1 for 0.002, 2 for 0.001 and 3 for 0.0005)
+\\ \\
+For instance mpi12.sub runs a job with the explicit upwind FTBS scheme and a $\Delta$t of 0.001.
+\\ \\
+There is also a make file with the code.
+
+\section{UML diagram of the project}
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.75\textwidth]{UMLdiagramrotated.jpg}
+\caption{\label{fig:image} UML diagram of the program}
+\end{figure}
+
+\clearpage
+\section{Results and norms of the errors for the implicit FTCS}
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=1.35\textwidth]{AllResImplFTCS.jpg}
+\caption{\label{fig:image} Results for the implicit FTCS scheme}
+\end{figure}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.7\textwidth]{tableErrorImplFTCSSERIAL.jpg}
+\caption{\label{fig:image} Norms of the errors for the explicit FTCS scheme, for the serial results}
+\end{figure}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.7\textwidth]{tableErrorImplFTCSPARA.jpg}
+\caption{\label{fig:image} Norms of the errors for the explicit FTCS scheme, for the parallel results}
+\end{figure}
+
+
+
+\end{document}
+
